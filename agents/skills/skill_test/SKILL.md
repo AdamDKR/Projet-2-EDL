@@ -5,6 +5,6 @@ description: Vérifie le travail, écrit un message de commit clair, puis pousse
 
 1. Regarde `git status` et `git diff`. Si un fichier ne doit pas partir (mot de passe, `data.db`, `.venv`), arrête-toi et préviens.
 2. Lance `pytest` dans le dossier de code. Si un test échoue, arrête-toi et donne le résultat.
-3. Fais `git add -A`, puis un commit avec un message en français qui commence par un verbe et dit ce qui change. Exemple : « Ajoute l'annulation d'une réservation ».
+3. RÈGLE STRICTE : Demande obligatoirement l'accord explicite de l'utilisateur AVANT d'effectuer le commit. Présente-lui le résumé des modifications et le message de commit proposé. Ne fais `git add -A` et `git commit` QUE si l'utilisateur valide expressément.
 4. Si la branche existe déjà sur GitHub, fais `git pull --no-rebase --no-edit`. En cas de conflit, arrête-toi et liste les fichiers, sans rien résoudre seul.
-5. Fais `git push`, avec `-u origin <branche>` si la branche est nouvelle, puis donne le message du commit et le résultat.
+5. RÈGLE STRICTE : Demande obligatoirement l'accord explicite de l'utilisateur AVANT de pousser sur GitHub. Ne fais jamais `git push` sans son accord formel.
