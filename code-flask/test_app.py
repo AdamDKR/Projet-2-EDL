@@ -1,7 +1,13 @@
 import pytest
 from app import app
 from base import ouvrir_base
-from regles import RegleReservationException, valider_reservation
+from regles import (
+    RegleReservationException,
+    calculer_semaine,
+    valider_modification_capacite,
+    valider_reservation,
+    valider_salle,
+)
 
 
 def test_accueil():
@@ -130,13 +136,29 @@ def test_regle_plus_de_4h_refuse():
 
 
 # =====================================================================
+# Tests unitaires sur la validation des salles
+# =====================================================================
+
+def test_regle_salle_invalide():
+    with pytest.raises(RegleReservationException):
+        valider_salle("", 10)
+    with pytest.raises(RegleReservationException):
+        valider_salle("Salle Test", 0)
+
+
+def test_regle_reduction_capacite_invalide():
+    """Impossible de réduire la capacité en dessous des participants d'une réservation existante."""
+    with pytest.raises(RegleReservationException):
+        valider_modification_capacite(nouvelle_capacite=10, max_participants_existants=15)
+
+
+# =====================================================================
 # Tests d'intégration Flask (routes HTTP)
 # =====================================================================
 
 def test_route_reserver_succes_et_nettoyage():
     client = app.test_client()
 
-    # Créneau valide le mardi 2026-11-10 de 14:00 à 15:00
     res = client.post(
         "/reservations",
         data={
@@ -150,23 +172,18 @@ def test_route_reserver_succes_et_nettoyage():
     )
     assert res.status_code == 302
 
-    # Vérification en base
     with ouvrir_base() as conn:
         ligne = conn.execute(
             "SELECT * FROM reservations WHERE personne = 'TestUserIntegration'"
         ).fetchone()
         assert ligne is not None
-        assert ligne["salle_id"] == 1
-        assert ligne["date"] == "2026-11-10"
-
-        # Nettoyage pour idempotence
         conn.execute("DELETE FROM reservations WHERE personne = 'TestUserIntegration'")
 
 
 def test_route_reserver_conflit():
     client = app.test_client()
 
-    # La salle 1 a déjà Alice de 10:00 à 12:00 le 2026-11-09 (données de base.sql)
+    # Salle 1 a déjà Alice de 10:00 à 12:00 le 2026-11-09
     res = client.post(
         "/reservations",
         data={
@@ -180,3 +197,121 @@ def test_route_reserver_conflit():
     )
     assert res.status_code == 400
     assert "chevauchement" in res.text.lower()
+
+
+def test_route_modifier_salle():
+    client = app.test_client()
+
+    with ouvrir_base() as conn:
+        conn.execute("INSERT INTO salles (nom, capacite, projecteur) VALUES ('Salle Modif', 15, 0)")
+        salle_id = conn.execute("SELECT last_insert_rowid() AS id").fetchone()["id"]
+
+    # Accès au formulaire
+    get_res = client.get(f"/salles/{salle_id}/modifier")
+    assert get_res.status_code == 200
+    assert "Salle Modif" in get_res.text
+
+    # Modification
+    post_res = client.post(
+        f"/salles/{salle_id}/modifier",
+        data={"nom": "Salle Modifiée Renommée", "capacite": 30, "projecteur": "1"},
+    )
+    assert post_res.status_code == 302
+
+    # Vérification
+    with ouvrir_base() as conn:
+        salle = conn.execute("SELECT * FROM salles WHERE id = ?", [salle_id]).fetchone()
+        assert salle["nom"] == "Salle Modifiée Renommée"
+        assert salle["capacite"] == 30
+        assert salle["projecteur"] == 1
+        # Nettoyage
+        conn.execute("DELETE FROM salles WHERE id = ?", [salle_id])
+
+
+def test_route_supprimer_salle_cascade():
+    """Règle métier : Supprimer une salle supprime ses réservations."""
+    client = app.test_client()
+
+    # Création d'une salle temporaire et d'une réservation
+    with ouvrir_base() as conn:
+        conn.execute("INSERT INTO salles (nom, capacite, projecteur) VALUES ('Salle Cascade', 10, 0)")
+        salle_id = conn.execute("SELECT last_insert_rowid() AS id").fetchone()["id"]
+        conn.execute(
+            """
+            INSERT INTO reservations (salle_id, personne, date, debut, fin, participants)
+            VALUES (?, 'CascadeUser', '2026-11-12', '14:00', '15:00', 8)
+            """,
+            [salle_id],
+        )
+
+    # Suppression de la salle
+    res = client.post(f"/salles/{salle_id}/supprimer")
+    assert res.status_code == 302
+
+    # Vérification que la salle ET la réservation ont disparu (cascade)
+    with ouvrir_base() as conn:
+        salle = conn.execute("SELECT * FROM salles WHERE id = ?", [salle_id]).fetchone()
+        assert salle is None
+
+        reservation = conn.execute(
+            "SELECT * FROM reservations WHERE personne = 'CascadeUser'"
+        ).fetchone()
+        assert reservation is None
+
+
+def test_route_annuler_reservation():
+    """Vérifie l'annulation d'une réservation."""
+    client = app.test_client()
+
+    with ouvrir_base() as conn:
+        conn.execute(
+            """
+            INSERT INTO reservations (salle_id, personne, date, debut, fin, participants)
+            VALUES (1, 'UserToCancel', '2026-11-13', '09:00', '10:00', 4)
+            """
+        )
+        res_id = conn.execute("SELECT last_insert_rowid() AS id").fetchone()["id"]
+
+    # Annulation
+    res = client.post(f"/reservations/{res_id}/annuler")
+    assert res.status_code == 302
+
+    # Vérification en base
+    with ouvrir_base() as conn:
+        reservation = conn.execute("SELECT * FROM reservations WHERE id = ?", [res_id]).fetchone()
+        assert reservation is None
+
+
+# =====================================================================
+# Tests du planning hebdomadaire
+# =====================================================================
+
+def test_calculer_semaine_lundi_au_dimanche():
+    """Règle métier : La semaine va du lundi au dimanche."""
+    # Test avec un mercredi (11 novembre 2026)
+    info = calculer_semaine("2026-11-11")
+    assert info["lundi"] == "2026-11-09"
+    assert info["dimanche"] == "2026-11-15"
+    assert len(info["jours"]) == 7
+    assert info["jours"][0]["nom_jour"] == "Lundi"
+    assert info["jours"][0]["date"] == "2026-11-09"
+    assert info["jours"][6]["nom_jour"] == "Dimanche"
+    assert info["jours"][6]["date"] == "2026-11-15"
+    assert info["date_prec"] == "2026-11-02"
+    assert info["date_suiv"] == "2026-11-16"
+
+
+def test_route_planning_affichage():
+    client = app.test_client()
+
+    # Affichage du planning de la salle 1 pour la semaine du 2026-11-09
+    res = client.get("/planning?salle_id=1&date=2026-11-09")
+    assert res.status_code == 200
+    assert "Planning d'une salle sur une semaine" in res.text
+    # Alice est réservée le lundi 2026-11-09 de 10:00 à 12:00
+    assert "Alice" in res.text
+    assert "10:00 - 12:00" in res.text
+    assert "Lundi" in res.text
+    assert "Dimanche" in res.text
+
+

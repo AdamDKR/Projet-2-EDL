@@ -2,6 +2,12 @@
 Ce module ne dépend d'aucun framework web (Flask, Streamlit, etc.).
 """
 
+from datetime import date, datetime, timedelta
+
+JOURS_SEMAINE = [
+    "Lundi", "Mardi", "Mercredi", "Jeudi", "Vendredi", "Samedi", "Dimanche"
+]
+
 
 class RegleReservationException(ValueError):
     """Exception levée lorsqu'une règle métier de réservation est enfreinte."""
@@ -20,6 +26,23 @@ def to_minutes(heure_str: str) -> int:
         return h * 60 + m
     except Exception:
         raise RegleReservationException(f"Format d'heure invalide : '{heure_str}' (attendu HH:MM)")
+
+
+def valider_salle(nom: str, capacite: int):
+    """Vérifie la validité des informations d'une salle."""
+    if not nom or not nom.strip():
+        raise RegleReservationException("Le nom de la salle est obligatoire.")
+    if capacite <= 0:
+        raise RegleReservationException("La capacité de la salle doit être supérieure à 0.")
+
+
+def valider_modification_capacite(nouvelle_capacite: int, max_participants_existants: int):
+    """Vérifie qu'une réduction de capacité ne rend pas invalides des réservations existantes."""
+    if max_participants_existants > 0 and nouvelle_capacite < max_participants_existants:
+        raise RegleReservationException(
+            f"Impossible de réduire la capacité à {nouvelle_capacite} : "
+            f"une réservation compte déjà {max_participants_existants} participants."
+        )
 
 
 def valider_horaires_et_duree(debut: str, fin: str):
@@ -93,3 +116,39 @@ def valider_reservation(
     valider_capacite(participants, capacite_salle)
     valider_non_chevauchement(debut, fin, reservations_existantes)
 
+
+def calculer_semaine(date_ref: str | None = None):
+    """Calcule les 7 jours de la semaine (du lundi au dimanche) contenant la date de référence.
+    Règle métier : La semaine va du lundi au dimanche.
+    """
+    if date_ref:
+        try:
+            d = datetime.strptime(date_ref, "%Y-%m-%d").date()
+        except ValueError:
+            d = date(2026, 11, 9)
+    else:
+        d = date(2026, 11, 9)
+
+    # 0 = Lundi, 6 = Dimanche
+    lundi = d - timedelta(days=d.weekday())
+    dimanche = lundi + timedelta(days=6)
+
+    jours = []
+    for i in range(7):
+        jour_date = lundi + timedelta(days=i)
+        jours.append({
+            "date": jour_date.isoformat(),
+            "nom_jour": JOURS_SEMAINE[i],
+            "label": f"{JOURS_SEMAINE[i]} {jour_date.strftime('%d/%m')}",
+        })
+
+    date_prec = (lundi - timedelta(days=7)).isoformat()
+    date_suiv = (lundi + timedelta(days=7)).isoformat()
+
+    return {
+        "lundi": lundi.isoformat(),
+        "dimanche": dimanche.isoformat(),
+        "jours": jours,
+        "date_prec": date_prec,
+        "date_suiv": date_suiv,
+    }
