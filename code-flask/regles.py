@@ -8,6 +8,14 @@ JOURS_SEMAINE = [
     "Lundi", "Mardi", "Mercredi", "Jeudi", "Vendredi", "Samedi", "Dimanche"
 ]
 
+TYPES_LOCAUX = [
+    "Salle de cours",
+    "Amphithéâtre",
+    "Salle de réunion",
+    "Laboratoire",
+    "Salle informatique",
+]
+
 
 class RegleReservationException(ValueError):
     """Exception levée lorsqu'une règle métier de réservation est enfreinte."""
@@ -28,12 +36,14 @@ def to_minutes(heure_str: str) -> int:
         raise RegleReservationException(f"Format d'heure invalide : '{heure_str}' (attendu HH:MM)")
 
 
-def valider_salle(nom: str, capacite: int):
+def valider_salle(nom: str, capacite: int, type_local: str = "Salle de cours"):
     """Vérifie la validité des informations d'une salle."""
     if not nom or not nom.strip():
         raise RegleReservationException("Le nom de la salle est obligatoire.")
     if capacite <= 0:
         raise RegleReservationException("La capacité de la salle doit être supérieure à 0.")
+    if type_local not in TYPES_LOCAUX:
+        raise RegleReservationException(f"Type de local invalide : '{type_local}'.")
 
 
 def valider_modification_capacite(nouvelle_capacite: int, max_participants_existants: int):
@@ -81,23 +91,44 @@ def valider_capacite(participants: int, capacite_salle: int):
         )
 
 
-def valider_non_chevauchement(debut: str, fin: str, reservations_existantes: list):
-    """Vérifie que deux réservations d'une même salle ne se chevauchent pas.
+def _trouver_chevauchement(debut: str, fin: str, reservations: list):
+    """Retourne la première réservation qui chevauche [debut, fin[, ou None.
     Finir à 12 h et commencer à 12 h est autorisé.
     """
     min_debut = to_minutes(debut)
     min_fin = to_minutes(fin)
 
-    for r in reservations_existantes:
+    for r in reservations:
         r_debut = to_minutes(r["debut"])
         r_fin = to_minutes(r["fin"])
 
         # Deux créneaux [debut, fin[ et [r_debut, r_fin[ se chevauchent si :
         # min_debut < r_fin et min_fin > r_debut
         if min_debut < r_fin and min_fin > r_debut:
-            raise RegleReservationException(
-                f"Chevauchement détecté : la salle est déjà occupée de {r['debut']} à {r['fin']}."
-            )
+            return r
+    return None
+
+
+def valider_non_chevauchement(debut: str, fin: str, reservations_existantes: list):
+    """Vérifie que deux réservations d'une même salle ne se chevauchent pas.
+    Finir à 12 h et commencer à 12 h est autorisé.
+    """
+    conflit = _trouver_chevauchement(debut, fin, reservations_existantes)
+    if conflit is not None:
+        raise RegleReservationException(
+            f"Chevauchement détecté : la salle est déjà occupée de {conflit['debut']} à {conflit['fin']}."
+        )
+
+
+def valider_non_chevauchement_personne(
+    personne: str, debut: str, fin: str, reservations_personne: list
+):
+    """Vérifie qu'une personne n'a pas deux réservations qui se chevauchent."""
+    conflit = _trouver_chevauchement(debut, fin, reservations_personne)
+    if conflit is not None:
+        raise RegleReservationException(
+            f"Chevauchement détecté : {personne} a déjà une réservation de {conflit['debut']} à {conflit['fin']}."
+        )
 
 
 def valider_reservation(
@@ -107,6 +138,7 @@ def valider_reservation(
     fin: str,
     participants: int,
     reservations_existantes: list,
+    reservations_personne: list | None = None,
 ):
     """Valide l'ensemble des règles pour une réservation."""
     if not personne or not personne.strip():
@@ -115,6 +147,19 @@ def valider_reservation(
     valider_horaires_et_duree(debut, fin)
     valider_capacite(participants, capacite_salle)
     valider_non_chevauchement(debut, fin, reservations_existantes)
+    if reservations_personne:
+        valider_non_chevauchement_personne(personne, debut, fin, reservations_personne)
+
+
+def generer_dates_hebdomadaires(date_debut: str, nb_semaines: int) -> list[str]:
+    """Génère la liste des dates hebdomadaires à partir de date_debut sur nb_semaines semaines."""
+    if nb_semaines < 1 or nb_semaines > 52:
+        raise RegleReservationException("Le nombre de semaines doit être compris entre 1 et 52.")
+    try:
+        d = datetime.strptime(date_debut, "%Y-%m-%d").date()
+    except ValueError:
+        raise RegleReservationException(f"Format de date invalide : '{date_debut}' (attendu AAAA-MM-JJ).")
+    return [(d + timedelta(weeks=i)).isoformat() for i in range(nb_semaines)]
 
 
 def calculer_semaine(date_ref: str | None = None):
