@@ -4,6 +4,7 @@ from base import ouvrir_base
 from regles import (
     RegleReservationException,
     calculer_semaine,
+    generer_dates_hebdomadaires,
     valider_modification_capacite,
     valider_reservation,
     valider_salle,
@@ -135,6 +136,35 @@ def test_regle_plus_de_4h_refuse():
     assert "4 heures" in str(exc.value)
 
 
+def test_regle_chevauchement_personne_refuse():
+    """Une personne ne peut pas avoir deux réservations qui se chevauchent (même dans une autre salle)."""
+    with pytest.raises(RegleReservationException) as exc:
+        valider_reservation(
+            personne="Alice",
+            capacite_salle=20,
+            debut="11:00",
+            fin="13:00",
+            participants=5,
+            reservations_existantes=[],
+            reservations_personne=RESERVATIONS_S1,
+        )
+    assert "alice" in str(exc.value).lower()
+    assert "chevauchement" in str(exc.value).lower()
+
+
+def test_regle_chevauchement_personne_adjacent_accepte():
+    """Une personne peut enchaîner deux réservations adjacentes (finir à 12 h, commencer à 12 h)."""
+    valider_reservation(
+        personne="Alice",
+        capacite_salle=20,
+        debut="12:00",
+        fin="13:00",
+        participants=5,
+        reservations_existantes=[],
+        reservations_personne=RESERVATIONS_S1,
+    )
+
+
 # =====================================================================
 # Tests unitaires sur la validation des salles
 # =====================================================================
@@ -144,6 +174,8 @@ def test_regle_salle_invalide():
         valider_salle("", 10)
     with pytest.raises(RegleReservationException):
         valider_salle("Salle Test", 0)
+    with pytest.raises(RegleReservationException):
+        valider_salle("Salle Test", 10, "TypeInexistant")
 
 
 def test_regle_reduction_capacite_invalide():
@@ -199,6 +231,44 @@ def test_route_reserver_conflit():
     assert "chevauchement" in res.text.lower()
 
 
+def test_route_reserver_conflit_personne():
+    client = app.test_client()
+
+    # Alice a déjà la salle 1 de 10:00 à 12:00 le 2026-11-09 : elle ne peut pas réserver la salle 2 en même temps
+    res = client.post(
+        "/reservations",
+        data={
+            "salle_id": 2,
+            "personne": "alice",
+            "date": "2026-11-09",
+            "debut": "11:00",
+            "fin": "12:30",
+            "participants": 4,
+        },
+    )
+    assert res.status_code == 400
+    assert "chevauchement" in res.text.lower()
+
+    # Créneau adjacent (12:00 à 13:00) dans la salle 2 : autorisé pour Alice
+    res_ok = client.post(
+        "/reservations",
+        data={
+            "salle_id": 2,
+            "personne": "Alice",
+            "date": "2026-11-09",
+            "debut": "12:00",
+            "fin": "13:00",
+            "participants": 4,
+        },
+    )
+    assert res_ok.status_code == 302
+
+    with ouvrir_base() as conn:
+        conn.execute(
+            "DELETE FROM reservations WHERE salle_id = 2 AND personne = 'Alice' AND date = '2026-11-09' AND debut = '12:00'"
+        )
+
+
 def test_route_modifier_salle():
     client = app.test_client()
 
@@ -214,7 +284,12 @@ def test_route_modifier_salle():
     # Modification
     post_res = client.post(
         f"/salles/{salle_id}/modifier",
-        data={"nom": "Salle Modifiée Renommée", "capacite": 30, "projecteur": "1"},
+        data={
+            "nom": "Salle Modifiée Renommée",
+            "capacite": 30,
+            "projecteur": "1",
+            "type_local": "Amphithéâtre",
+        },
     )
     assert post_res.status_code == 302
 
@@ -224,8 +299,44 @@ def test_route_modifier_salle():
         assert salle["nom"] == "Salle Modifiée Renommée"
         assert salle["capacite"] == 30
         assert salle["projecteur"] == 1
+        assert salle["type_local"] == "Amphithéâtre"
         # Nettoyage
         conn.execute("DELETE FROM salles WHERE id = ?", [salle_id])
+
+
+def test_route_ajouter_et_filtrer_type_local():
+    """Vérifie l'ajout d'une salle avec type de local et le filtrage par type de local."""
+    client = app.test_client()
+
+    try:
+        res_cours = client.post(
+            "/salles",
+            data={"nom": "Salle Cours Test", "capacite": 20, "type_local": "Salle de cours"},
+        )
+        assert res_cours.status_code == 302
+
+        res_ajout = client.post(
+            "/salles",
+            data={"nom": "Labo Chimie", "capacite": 16, "type_local": "Laboratoire"},
+        )
+        assert res_ajout.status_code == 302
+
+        # Filtrer par Laboratoire : Labo Chimie doit apparaître, mais pas Salle Cours Test ni la réservation d'Alice
+        res_filtre_labo = client.get("/?type_local=Laboratoire")
+        assert res_filtre_labo.status_code == 200
+        assert "<strong>Labo Chimie</strong>" in res_filtre_labo.text
+        assert "<strong>Salle Cours Test</strong>" not in res_filtre_labo.text
+        assert "<td>Alice</td>" not in res_filtre_labo.text
+
+        # Filtrer par Salle de cours : Salle Cours Test et Alice doivent apparaître, mais pas Labo Chimie
+        res_filtre_cours = client.get("/?type_local=Salle+de+cours")
+        assert res_filtre_cours.status_code == 200
+        assert "<strong>Salle Cours Test</strong>" in res_filtre_cours.text
+        assert "<td>Alice</td>" in res_filtre_cours.text
+        assert "<strong>Labo Chimie</strong>" not in res_filtre_cours.text
+    finally:
+        with ouvrir_base() as conn:
+            conn.execute("DELETE FROM salles WHERE nom IN ('Labo Chimie', 'Salle Cours Test')")
 
 
 def test_route_supprimer_salle_cascade():
@@ -313,5 +424,69 @@ def test_route_planning_affichage():
     assert "10:00 - 12:00" in res.text
     assert "Lundi" in res.text
     assert "Dimanche" in res.text
+
+
+# =====================================================================
+# Tests des réservations répétées chaque semaine
+# =====================================================================
+
+def test_generer_dates_hebdomadaires():
+    dates = generer_dates_hebdomadaires("2026-11-09", 3)
+    assert dates == ["2026-11-09", "2026-11-16", "2026-11-23"]
+
+    with pytest.raises(RegleReservationException):
+        generer_dates_hebdomadaires("2026-11-09", 0)
+    with pytest.raises(RegleReservationException):
+        generer_dates_hebdomadaires("2026-11-09", 53)
+
+
+def test_route_reservation_hebdomadaire_avec_conflit_et_annulation():
+    """Vérifie la création hebdomadaire en ignorant les conflits, puis l'annulation individuelle et de série."""
+    client = app.test_client()
+
+    try:
+        # 2026-11-09 10:00-12:00 est déjà pris par Alice en salle 1 : doit être ignorée,
+        # tandis que 2026-11-16 et 2026-11-23 doivent être créées avec le même serie_id.
+        res = client.post(
+            "/reservations",
+            data={
+                "salle_id": 1,
+                "personne": "RecurrentUser",
+                "date": "2026-11-09",
+                "debut": "10:00",
+                "fin": "12:00",
+                "participants": 6,
+                "nb_semaines": 3,
+            },
+        )
+        assert res.status_code == 302
+
+        with ouvrir_base() as conn:
+            lignes = conn.execute(
+                "SELECT id, date, serie_id FROM reservations WHERE personne = 'RecurrentUser' ORDER BY date"
+            ).fetchall()
+
+        assert [r["date"] for r in lignes] == ["2026-11-16", "2026-11-23"]
+        serie_id = lignes[0]["serie_id"]
+        assert serie_id is not None
+        assert lignes[1]["serie_id"] == serie_id
+
+        # Vérifie l'affichage du bouton d'annulation de série sur l'accueil
+        page_accueil = client.get("/")
+        assert page_accueil.status_code == 200
+        assert "Annuler la série" in page_accueil.text
+
+        # Annule la série complète
+        res_annul_serie = client.post(f"/reservations/serie/{serie_id}/annuler")
+        assert res_annul_serie.status_code == 302
+
+        with ouvrir_base() as conn:
+            restantes = conn.execute(
+                "SELECT * FROM reservations WHERE personne = 'RecurrentUser'"
+            ).fetchall()
+        assert len(restantes) == 0
+    finally:
+        with ouvrir_base() as conn:
+            conn.execute("DELETE FROM reservations WHERE personne = 'RecurrentUser'")
 
 
